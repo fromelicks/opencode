@@ -392,11 +392,10 @@ export const McpLogoutCommand = effectCmd({
 })
 
 async function resolveConfigPath(baseDir: string, global = false) {
-  // Check for existing config files (prefer .jsonc over .json, check .opencode/ subdirectory too)
-  const candidates = [path.join(baseDir, "opencode.json"), path.join(baseDir, "opencode.jsonc")]
+  const candidates = [path.join(baseDir, "opencode.jsonc"), path.join(baseDir, "opencode.json")]
 
   if (!global) {
-    candidates.push(path.join(baseDir, ".opencode", "opencode.json"), path.join(baseDir, ".opencode", "opencode.jsonc"))
+    candidates.push(path.join(baseDir, ".opencode", "opencode.jsonc"), path.join(baseDir, ".opencode", "opencode.json"))
   }
 
   for (const candidate of candidates) {
@@ -405,12 +404,11 @@ async function resolveConfigPath(baseDir: string, global = false) {
     }
   }
 
-  // Default to opencode.json if none exist
   return candidates[0]
 }
 
 async function addMcpToConfig(name: string, mcpConfig: ConfigMCPV1.Info, configPath: string) {
-  let text = "{}"
+  let text = '{\n  "$schema": "https://opencode.ai/config.json"\n}\n'
   if (await Filesystem.exists(configPath)) {
     text = await Filesystem.readText(configPath)
   }
@@ -448,6 +446,22 @@ export const McpAddCommand = effectCmd({
         describe: "HTTP header for a remote MCP server (KEY=VALUE)",
         type: "string",
         array: true,
+      })
+      .option("oauth", {
+        describe: "OAuth auto-detection for a remote MCP server; set to false to disable",
+        type: "boolean",
+      })
+      .option("enabled", {
+        describe: "enable or disable the MCP server on startup",
+        type: "boolean",
+      })
+      .option("timeout", {
+        describe: "timeout in milliseconds for MCP server requests",
+        type: "number",
+      })
+      .option("config", {
+        describe: "path to the OpenCode config file",
+        type: "string",
       }),
   handler: Effect.fn("Cli.mcp.add")(function* (args) {
     const maybeCtx = yield* InstanceRef
@@ -455,7 +469,17 @@ export const McpAddCommand = effectCmd({
     const ctx = maybeCtx
     yield* Effect.promise(async () => {
       const command = args["--"] ?? []
-      if (!args.name && (args.url || args.env?.length || args.header?.length || command.length)) {
+      if (
+        !args.name &&
+        (args.url ||
+          args.env?.length ||
+          args.header?.length ||
+          args.oauth !== undefined ||
+          args.enabled !== undefined ||
+          args.timeout !== undefined ||
+          args.config ||
+          command.length)
+      ) {
         throw new Error("A server name is required for non-interactive MCP configuration")
       }
       if (args.name) {
@@ -470,6 +494,15 @@ export const McpAddCommand = effectCmd({
         }
         if (command.length && args.header?.length) {
           throw new Error("--header is only valid for remote MCP servers")
+        }
+        if (command.length && args.oauth !== undefined) {
+          throw new Error("--oauth is only valid for remote MCP servers")
+        }
+        if (args.oauth === true) {
+          throw new Error("--oauth can only be set to false; omit it to use OAuth auto-detection")
+        }
+        if (args.timeout !== undefined && (!Number.isInteger(args.timeout) || args.timeout <= 0)) {
+          throw new Error("--timeout must be a positive integer")
         }
 
         const entries = (values: string[], kind: string) =>
@@ -487,14 +520,19 @@ export const McpAddCommand = effectCmd({
               type: "remote",
               url: args.url,
               ...(Object.keys(headers).length ? { headers } : {}),
+              ...(args.oauth === false ? { oauth: false as const } : {}),
+              ...(args.enabled !== undefined ? { enabled: args.enabled } : {}),
+              ...(args.timeout !== undefined ? { timeout: args.timeout } : {}),
             }
           : {
               type: "local",
               command,
               ...(Object.keys(environment).length ? { environment } : {}),
+              ...(args.enabled !== undefined ? { enabled: args.enabled } : {}),
+              ...(args.timeout !== undefined ? { timeout: args.timeout } : {}),
             }
 
-        const configPath = await resolveConfigPath(Global.Path.config, true)
+        const configPath = args.config ? path.resolve(args.config) : await resolveConfigPath(Global.Path.config, true)
         await addMcpToConfig(args.name, mcpConfig, configPath)
         prompts.log.success(`MCP server "${args.name}" added to ${configPath}`)
         return
