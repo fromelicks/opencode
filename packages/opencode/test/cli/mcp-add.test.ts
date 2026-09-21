@@ -1,6 +1,6 @@
 import { describe, expect } from "bun:test"
 import { Effect } from "effect"
-import { parse as parseJsonc } from "jsonc-parser"
+import { parse } from "jsonc-parser"
 import { mkdir } from "node:fs/promises"
 import path from "path"
 import { cliIt } from "../lib/cli-process"
@@ -117,7 +117,7 @@ describe("opencode mcp add (non-interactive subprocess)", () => {
         const text = yield* Effect.promise(() => Bun.file(configPath).text())
         expect(text).toContain("// Keep this user setting.")
         expect(text).toContain("// Keep this other server.")
-        const config = parseJsonc(text)
+        const config = parse(text)
         expect(config.model).toBe("provider/model")
         expect(config.mcp.other).toEqual({
           type: "remote",
@@ -130,6 +130,84 @@ describe("opencode mcp add (non-interactive subprocess)", () => {
           enabled: true,
           timeout: 120000,
         })
+      }),
+    60_000,
+  )
+
+  cliIt.concurrent(
+    "skips a remote server when its URL is already configured under another name",
+    ({ home, opencode }) =>
+      Effect.gen(function* () {
+        const configPath = path.join(home, ".config", "opencode", "opencode.jsonc")
+        const original = `{
+  "$schema": "https://opencode.ai/config.json",
+  // Preserve the existing server exactly.
+  "mcp": {
+    "existing": {
+      "type": "remote",
+      "url": "https://example.com/catalog",
+      "enabled": false
+    }
+  }
+}
+`
+        yield* Effect.promise(() => mkdir(path.dirname(configPath), { recursive: true }))
+        yield* Effect.promise(() => Bun.write(configPath, original))
+
+        const result = yield* opencode.spawn([
+          "mcp",
+          "add",
+          "catalog",
+          "--url",
+          "https://example.com/catalog",
+          "--oauth=false",
+          "--enabled=true",
+          "--timeout",
+          "120000",
+          "--config",
+          configPath,
+          "--skip-existing-url",
+        ])
+        opencode.expectExit(result, 0)
+        expect(yield* Effect.promise(() => Bun.file(configPath).text())).toBe(original)
+      }),
+    60_000,
+  )
+
+  cliIt.concurrent(
+    "checks the resolved global config when writing to an explicit file",
+    ({ home, opencode }) =>
+      Effect.gen(function* () {
+        const existingPath = path.join(home, ".config", "opencode", "opencode.json")
+        const targetPath = path.join(home, ".config", "opencode", "opencode.jsonc")
+        yield* Effect.promise(() => mkdir(path.dirname(existingPath), { recursive: true }))
+        yield* Effect.promise(() =>
+          Bun.write(
+            existingPath,
+            JSON.stringify({
+              $schema: "https://opencode.ai/config.json",
+              mcp: {
+                existing: {
+                  type: "remote",
+                  url: "https://example.com/catalog",
+                },
+              },
+            }),
+          ),
+        )
+
+        const result = yield* opencode.spawn([
+          "mcp",
+          "add",
+          "catalog",
+          "--url",
+          "https://example.com/catalog",
+          "--config",
+          targetPath,
+          "--skip-existing-url",
+        ])
+        opencode.expectExit(result, 0)
+        expect(yield* Effect.promise(() => Bun.file(targetPath).exists())).toBe(false)
       }),
     60_000,
   )

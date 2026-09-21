@@ -17,7 +17,7 @@ import { InstanceRef } from "@/effect/instance-ref"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import path from "path"
 import { Global } from "@opencode-ai/core/global"
-import { modify, applyEdits } from "jsonc-parser"
+import { modify, applyEdits, parse, type ParseError } from "jsonc-parser"
 import { Filesystem } from "@/util/filesystem"
 import { Effect } from "effect"
 
@@ -424,6 +424,22 @@ async function addMcpToConfig(name: string, mcpConfig: ConfigMCPV1.Info, configP
   return configPath
 }
 
+function findMcpByUrl(mcp: unknown, url: string) {
+  if (typeof mcp !== "object" || mcp === null || Array.isArray(mcp)) return
+  return Object.entries(mcp).find(
+    ([, item]) => typeof item === "object" && item !== null && "url" in item && item.url === url,
+  )?.[0]
+}
+
+async function findMcpInFileByUrl(configPath: string, url: string) {
+  if (!(await Filesystem.exists(configPath))) return
+
+  const errors: ParseError[] = []
+  const config = parse(await Filesystem.readText(configPath), errors, { allowTrailingComma: true })
+  if (errors.length) throw new Error(`Cannot inspect ${configPath}: invalid JSONC`)
+  return findMcpByUrl(config?.mcp, url)
+}
+
 export const McpAddCommand = effectCmd({
   command: "add [name]",
   describe: "add an MCP server",
@@ -462,11 +478,17 @@ export const McpAddCommand = effectCmd({
       .option("config", {
         describe: "path to the OpenCode config file",
         type: "string",
+      })
+      .option("skip-existing-url", {
+        describe: "skip adding a remote server when its URL is already configured",
+        type: "boolean",
       }),
   handler: Effect.fn("Cli.mcp.add")(function* (args) {
     const maybeCtx = yield* InstanceRef
     if (!maybeCtx) return yield* Effect.die("InstanceRef not provided")
     const ctx = maybeCtx
+    const cfg = yield* Config.Service
+    const globalConfig = args.skipExistingUrl ? yield* cfg.getGlobal() : undefined
     yield* Effect.promise(async () => {
       const command = args["--"] ?? []
       if (
@@ -478,6 +500,7 @@ export const McpAddCommand = effectCmd({
           args.enabled !== undefined ||
           args.timeout !== undefined ||
           args.config ||
+          args.skipExistingUrl ||
           command.length)
       ) {
         throw new Error("A server name is required for non-interactive MCP configuration")
@@ -497,6 +520,9 @@ export const McpAddCommand = effectCmd({
         }
         if (command.length && args.oauth !== undefined) {
           throw new Error("--oauth is only valid for remote MCP servers")
+        }
+        if (command.length && args.skipExistingUrl) {
+          throw new Error("--skip-existing-url is only valid for remote MCP servers")
         }
         if (args.oauth === true) {
           throw new Error("--oauth can only be set to false; omit it to use OAuth auto-detection")
@@ -533,6 +559,14 @@ export const McpAddCommand = effectCmd({
             }
 
         const configPath = args.config ? path.resolve(args.config) : await resolveConfigPath(Global.Path.config, true)
+        const existing =
+          args.skipExistingUrl && args.url
+            ? (findMcpByUrl(globalConfig?.mcp, args.url) ?? (await findMcpInFileByUrl(configPath, args.url)))
+            : undefined
+        if (existing) {
+          prompts.log.info(`MCP server "${existing}" already uses ${args.url} in ${configPath}`)
+          return
+        }
         await addMcpToConfig(args.name, mcpConfig, configPath)
         prompts.log.success(`MCP server "${args.name}" added to ${configPath}`)
         return
